@@ -226,10 +226,13 @@ class AbletonMCP(ControlSurface):
                 track_index = params.get("track_index", 0)
                 response["result"] = self._get_track_info(track_index)
             # Commands that modify Live's state should be scheduled on the main thread
-            elif command_type in ["create_midi_track", "set_track_name", 
-                                 "create_clip", "add_notes_to_clip", "set_clip_name", 
+            elif command_type in ["create_midi_track", "set_track_name",
+                                 "create_clip", "add_notes_to_clip", "set_clip_name",
                                  "set_tempo", "fire_clip", "stop_clip",
-                                 "start_playback", "stop_playback", "load_browser_item"]:
+                                 "start_playback", "stop_playback", "load_browser_item",
+                                 # Arrangement view – must run on the main thread
+                                 "switch_to_arrangement_view", "set_current_song_time",
+                                 "duplicate_session_clip_to_arrangement"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
                 
@@ -282,7 +285,19 @@ class AbletonMCP(ControlSurface):
                             track_index = params.get("track_index", 0)
                             item_uri = params.get("item_uri", "")
                             result = self._load_browser_item(track_index, item_uri)
-                        
+                        # ── Arrangement view commands ──────────────────────────────
+                        elif command_type == "switch_to_arrangement_view":
+                            result = self._switch_to_arrangement_view()
+                        elif command_type == "set_current_song_time":
+                            time_val = params.get("time", 0.0)
+                            result = self._set_current_song_time(time_val)
+                        elif command_type == "duplicate_session_clip_to_arrangement":
+                            track_index = params.get("track_index", 0)
+                            clip_index = params.get("clip_index", 0)
+                            destination_time = params.get("destination_time", 0.0)
+                            result = self._duplicate_session_clip_to_arrangement(
+                                track_index, clip_index, destination_time)
+
                         # Put the result in the queue
                         response_queue.put({"status": "success", "result": result})
                     except Exception as e:
@@ -326,6 +341,10 @@ class AbletonMCP(ControlSurface):
             elif command_type == "get_browser_items_at_path":
                 path = params.get("path", "")
                 response["result"] = self.get_browser_items_at_path(path)
+            # Read-only arrangement command – no main-thread scheduling required
+            elif command_type == "get_arrangement_clips":
+                track_index = params.get("track_index", 0)
+                response["result"] = self._get_arrangement_clips(track_index)
             else:
                 response["status"] = "error"
                 response["message"] = "Unknown command: " + command_type
@@ -637,6 +656,107 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error stopping playback: " + str(e))
             raise
     
+    # ── Arrangement view implementations ──────────────────────────────────────
+
+    def _switch_to_arrangement_view(self):
+        """Switch Ableton's main window to the Arrangement view"""
+        try:
+            self.application().view.show_view("Arranger")
+            return {"view": "Arranger"}
+        except Exception as e:
+            self.log_message("Error switching to arrangement view: " + str(e))
+            raise
+
+    def _set_current_song_time(self, time_val):
+        """Move the arrangement playhead to a position in beats"""
+        try:
+            self._song.current_song_time = float(time_val)
+            return {"current_song_time": self._song.current_song_time}
+        except Exception as e:
+            self.log_message("Error setting current song time: " + str(e))
+            raise
+
+    def _get_arrangement_clips(self, track_index):
+        """Return all clips placed in the Arrangement timeline for a track.
+
+        Each clip dict contains:
+          name, start_time, end_time, length, color,
+          is_midi_clip, is_audio_clip, is_playing
+        """
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            track = self._song.tracks[track_index]
+            clips = []
+
+            # track.arrangement_clips is available in Live 11 / 12
+            for clip in track.arrangement_clips:
+                clips.append({
+                    "name": clip.name,
+                    "start_time": clip.start_time,
+                    "end_time": clip.end_time,
+                    "length": clip.length,
+                    "color": clip.color,
+                    "is_midi_clip": clip.is_midi_clip,
+                    "is_audio_clip": clip.is_audio_clip,
+                    "is_playing": clip.is_playing
+                })
+
+            return {
+                "track_index": track_index,
+                "track_name": track.name,
+                "clip_count": len(clips),
+                "clips": clips
+            }
+        except Exception as e:
+            self.log_message("Error getting arrangement clips: " + str(e))
+            raise
+
+    def _duplicate_session_clip_to_arrangement(self, track_index, clip_index, destination_time):
+        """Copy a Session-view clip into the Arrangement timeline.
+
+        Uses the real Live API:
+          track.duplicate_clip_to_arrangement(clip, destination_time)
+
+        Available in Live 11 / 12.  destination_time is in beats from the
+        start of the arrangement.
+        """
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            track = self._song.tracks[track_index]
+
+            if clip_index < 0 or clip_index >= len(track.clip_slots):
+                raise IndexError("Clip slot index out of range")
+
+            clip_slot = track.clip_slots[clip_index]
+
+            if not clip_slot.has_clip:
+                raise Exception(
+                    "No clip in slot " + str(clip_index) +
+                    " on track " + str(track_index)
+                )
+
+            clip = clip_slot.clip
+
+            # Duplicate to arrangement at the requested beat position
+            track.duplicate_clip_to_arrangement(clip, float(destination_time))
+
+            return {
+                "success": True,
+                "track_index": track_index,
+                "track_name": track.name,
+                "clip_name": clip.name,
+                "destination_time": destination_time
+            }
+        except Exception as e:
+            self.log_message("Error duplicating clip to arrangement: " + str(e))
+            raise
+
+    # ── Browser implementations ───────────────────────────────────────────────
+
     def _get_browser_item(self, uri, path):
         """Get a browser item by URI or path"""
         try:

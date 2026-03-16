@@ -105,7 +105,10 @@ class AbletonConnection:
             "create_midi_track", "create_audio_track", "set_track_name",
             "create_clip", "add_notes_to_clip", "set_clip_name",
             "set_tempo", "fire_clip", "stop_clip", "set_device_parameter",
-            "start_playback", "stop_playback", "load_instrument_or_effect"
+            "start_playback", "stop_playback", "load_instrument_or_effect",
+            # Arrangement view commands
+            "switch_to_arrangement_view", "set_current_song_time",
+            "duplicate_session_clip_to_arrangement"
         ]
         
         try:
@@ -650,6 +653,102 @@ def load_drum_kit(ctx: Context, track_index: int, rack_uri: str, kit_path: str) 
     except Exception as e:
         logger.error(f"Error loading drum kit: {str(e)}")
         return f"Error loading drum kit: {str(e)}"
+
+# ── Arrangement view tools ────────────────────────────────────────────────────
+
+@mcp.tool()
+def switch_to_arrangement_view(ctx: Context) -> str:
+    """Switch Ableton's main window to the Arrangement view."""
+    try:
+        ableton = get_ableton_connection()
+        ableton.send_command("switch_to_arrangement_view")
+        return "Switched to Arrangement view"
+    except Exception as e:
+        logger.error(f"Error switching to arrangement view: {str(e)}")
+        return f"Error switching to arrangement view: {str(e)}"
+
+
+@mcp.tool()
+def set_arrangement_time(ctx: Context, time: float) -> str:
+    """
+    Move the arrangement playhead to a specific position.
+
+    Parameters:
+    - time: Position in beats from the start of the arrangement (e.g. 8.0 = bar 3 in 4/4)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_current_song_time", {"time": time})
+        return f"Playhead moved to beat {result.get('current_song_time', time)}"
+    except Exception as e:
+        logger.error(f"Error setting arrangement time: {str(e)}")
+        return f"Error setting arrangement time: {str(e)}"
+
+
+@mcp.tool()
+def get_arrangement_clips(ctx: Context, track_index: int) -> str:
+    """
+    List all clips placed in the Arrangement timeline for a track.
+
+    Returns each clip's name, start_time, end_time, length, and type.
+
+    Parameters:
+    - track_index: The index of the track to inspect
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_arrangement_clips", {"track_index": track_index})
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting arrangement clips: {str(e)}")
+        return f"Error getting arrangement clips: {str(e)}"
+
+
+@mcp.tool()
+def duplicate_to_arrangement(
+    ctx: Context,
+    track_index: int,
+    clip_index: int,
+    destination_time: float
+) -> str:
+    """
+    Copy a Session-view clip into the Arrangement timeline.
+
+    Uses Live's track.duplicate_clip_to_arrangement() API (Live 11 / 12).
+    The clip is placed at destination_time beats from the start of the
+    arrangement on the same track it lives in.
+
+    Typical workflow:
+      1. create_clip / add_notes_to_clip to build a Session clip
+      2. Call duplicate_to_arrangement once per bar/section you need
+      3. Call switch_to_arrangement_view to confirm the result in Live
+
+    Parameters:
+    - track_index:       Index of the track that owns the Session clip
+    - clip_index:        Index of the clip slot in that track (Session view)
+    - destination_time:  Beat position in the arrangement to place the clip
+                         (e.g. 0.0 = start, 8.0 = bar 3 in 4/4)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command(
+            "duplicate_session_clip_to_arrangement",
+            {
+                "track_index": track_index,
+                "clip_index": clip_index,
+                "destination_time": destination_time
+            }
+        )
+        clip_name = result.get("clip_name", "clip")
+        track_name = result.get("track_name", f"track {track_index}")
+        return (
+            f"Duplicated '{clip_name}' from Session slot {clip_index} "
+            f"on '{track_name}' to arrangement at beat {destination_time}"
+        )
+    except Exception as e:
+        logger.error(f"Error duplicating clip to arrangement: {str(e)}")
+        return f"Error duplicating clip to arrangement: {str(e)}"
+
 
 # Main execution
 def main():
