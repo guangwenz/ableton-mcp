@@ -227,13 +227,14 @@ class AbletonMCP(ControlSurface):
                 response["result"] = self._get_track_info(track_index)
             # Commands that modify Live's state should be scheduled on the main thread
             elif command_type in ["create_midi_track", "set_track_name", 
-                                 "create_clip", "add_notes_to_clip", "set_clip_name", 
+                                 "create_clip", "delete_clip", "add_notes_to_clip", "set_clip_name", 
                                  "set_tempo", "fire_clip", "stop_clip",
                                  "start_playback", "stop_playback", "load_browser_item",
                                  "set_track_volume", "set_track_panning", 
                                  "set_track_mute", "set_track_solo",
                                  "set_master_volume", "set_master_panning",
-                                 "set_device_parameter"]:
+                                 "set_device_parameter",
+                                 "search_browser", "list_browser_category"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
                 
@@ -253,6 +254,10 @@ class AbletonMCP(ControlSurface):
                             clip_index = params.get("clip_index", 0)
                             length = params.get("length", 4.0)
                             result = self._create_clip(track_index, clip_index, length)
+                        elif command_type == "delete_clip":
+                            track_index = params.get("track_index", 0)
+                            clip_index = params.get("clip_index", 0)
+                            result = self._delete_clip(track_index, clip_index)
                         elif command_type == "add_notes_to_clip":
                             track_index = params.get("track_index", 0)
                             clip_index = params.get("clip_index", 0)
@@ -314,7 +319,16 @@ class AbletonMCP(ControlSurface):
                             parameter_index = params.get("parameter_index", 0)
                             value = params.get("value", 0.0)
                             result = self._set_device_parameter(track_index, device_index, parameter_index, value)
-                        
+                        elif command_type == "search_browser":
+                            query = params.get("query", "")
+                            category = params.get("category", "all")
+                            max_results = params.get("max_results", 20)
+                            result = self._search_browser(query, category, max_results)
+                        elif command_type == "list_browser_category":
+                            category = params.get("category", "instruments")
+                            depth = params.get("depth", 2)
+                            result = self._list_browser_category(category, depth)
+
                         # Put the result in the queue
                         response_queue.put({"status": "success", "result": result})
                     except Exception as e:
@@ -512,7 +526,24 @@ class AbletonMCP(ControlSurface):
         except Exception as e:
             self.log_message("Error creating clip: " + str(e))
             raise
-    
+
+    def _delete_clip(self, track_index, clip_index):
+        """Delete a clip from the specified track and clip slot"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+            track = self._song.tracks[track_index]
+            if clip_index < 0 or clip_index >= len(track.clip_slots):
+                raise IndexError("Clip index out of range")
+            clip_slot = track.clip_slots[clip_index]
+            if not clip_slot.has_clip:
+                raise Exception("No clip in slot to delete")
+            clip_slot.delete_clip()
+            return {"deleted": True}
+        except Exception as e:
+            self.log_message("Error deleting clip: " + str(e))
+            raise
+
     def _add_notes_to_clip(self, track_index, clip_index, notes):
         """Add MIDI notes to a clip"""
         try:
@@ -806,7 +837,7 @@ class AbletonMCP(ControlSurface):
                 
                 # Determine the root based on the first part
                 current_item = None
-                if path_parts[0].lower() == "nstruments":
+                if path_parts[0].lower() == "instruments":
                     current_item = app.browser.instruments
                 elif path_parts[0].lower() == "sounds":
                     current_item = app.browser.sounds
@@ -935,6 +966,119 @@ class AbletonMCP(ControlSurface):
     
     # Helper methods
     
+    def _search_browser(self, query, category="all", max_results=20):
+        """Search the browser for items matching query string"""
+        try:
+            app = self.application()
+            if not app:
+                raise RuntimeError("Could not access Live application")
+
+            browser = app.browser
+            results = []
+            query_lower = query.lower()
+
+            # Determine which categories to search
+            categories = []
+            cat_lower = category.lower()
+            if cat_lower in ("all", "instruments") and hasattr(browser, 'instruments'):
+                categories.append(("Instruments", browser.instruments))
+            if cat_lower in ("all", "sounds") and hasattr(browser, 'sounds'):
+                categories.append(("Sounds", browser.sounds))
+            if cat_lower in ("all", "drums") and hasattr(browser, 'drums'):
+                categories.append(("Drums", browser.drums))
+            if cat_lower in ("all", "audio_effects") and hasattr(browser, 'audio_effects'):
+                categories.append(("Audio Effects", browser.audio_effects))
+            if cat_lower in ("all", "midi_effects") and hasattr(browser, 'midi_effects'):
+                categories.append(("MIDI Effects", browser.midi_effects))
+
+            def search_recursive(item, category_name, depth=0, path=""):
+                if len(results) >= max_results:
+                    return
+                if depth > 6:
+                    return
+
+                try:
+                    name = item.name if hasattr(item, 'name') else ""
+                    current_path = path + "/" + name if path else name
+
+                    # Check if this item matches
+                    if query_lower in name.lower():
+                        is_loadable = hasattr(item, 'is_loadable') and item.is_loadable
+                        uri = item.uri if hasattr(item, 'uri') else ""
+                        results.append({
+                            "name": name,
+                            "category": category_name,
+                            "path": current_path,
+                            "uri": uri,
+                            "is_loadable": is_loadable,
+                            "is_folder": hasattr(item, 'children') and bool(item.children),
+                            "is_device": hasattr(item, 'is_device') and item.is_device
+                        })
+
+                    # Recurse into children
+                    if hasattr(item, 'children') and item.children:
+                        for child in item.children:
+                            if len(results) >= max_results:
+                                return
+                            search_recursive(child, category_name, depth + 1, current_path)
+                except Exception as e:
+                    self.log_message("Search error at depth {0}: {1}".format(depth, str(e)))
+
+            for cat_name, cat_item in categories:
+                if len(results) >= max_results:
+                    break
+                search_recursive(cat_item, cat_name)
+
+            return {"query": query, "category": category, "count": len(results), "items": results}
+        except Exception as e:
+            self.log_message("Error in search_browser: " + str(e))
+            self.log_message(traceback.format_exc())
+            raise
+
+    def _list_browser_category(self, category="instruments", depth=2):
+        """List items in a browser category up to given depth"""
+        try:
+            app = self.application()
+            if not app:
+                raise RuntimeError("Could not access Live application")
+
+            browser = app.browser
+            cat_lower = category.lower()
+
+            root = None
+            if cat_lower == "instruments" and hasattr(browser, 'instruments'):
+                root = browser.instruments
+            elif cat_lower == "sounds" and hasattr(browser, 'sounds'):
+                root = browser.sounds
+            elif cat_lower == "drums" and hasattr(browser, 'drums'):
+                root = browser.drums
+            elif cat_lower == "audio_effects" and hasattr(browser, 'audio_effects'):
+                root = browser.audio_effects
+            elif cat_lower == "midi_effects" and hasattr(browser, 'midi_effects'):
+                root = browser.midi_effects
+            else:
+                raise ValueError("Unknown category: {0}. Use: instruments, sounds, drums, audio_effects, midi_effects".format(category))
+
+            def list_recursive(item, current_depth=0):
+                entry = {
+                    "name": item.name if hasattr(item, 'name') else "Unknown",
+                    "uri": item.uri if hasattr(item, 'uri') else "",
+                    "is_loadable": hasattr(item, 'is_loadable') and item.is_loadable,
+                    "is_folder": hasattr(item, 'children') and bool(item.children),
+                }
+                if current_depth < depth and hasattr(item, 'children') and item.children:
+                    entry["children"] = []
+                    for child in item.children:
+                        entry["children"].append(list_recursive(child, current_depth + 1))
+                return entry
+
+            tree = list_recursive(root)
+            return {"category": category, "tree": tree}
+        except Exception as e:
+            self.log_message("Error in list_browser_category: " + str(e))
+            self.log_message(traceback.format_exc())
+            raise
+
     def _get_device_type(self, device):
         """Get the type of a device"""
         try:
