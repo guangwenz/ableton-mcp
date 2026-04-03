@@ -219,14 +219,9 @@ class AbletonMCP(ControlSurface):
         }
         
         try:
-            # Route the command to the appropriate handler
-            if command_type == "get_session_info":
-                response["result"] = self._get_session_info()
-            elif command_type == "get_track_info":
-                track_index = params.get("track_index", 0)
-                response["result"] = self._get_track_info(track_index)
-            # Commands that modify Live's state should be scheduled on the main thread
-            elif command_type in ["create_midi_track", "set_track_name", 
+            # ALL commands run on the main thread for reliable API access
+            if command_type in ["get_session_info", "get_track_info", "get_device_parameters",
+                                 "create_midi_track", "set_track_name", 
                                  "create_clip", "delete_clip", "add_notes_to_clip", "set_clip_name", 
                                  "set_tempo", "fire_clip", "stop_clip",
                                  "start_playback", "stop_playback", "load_browser_item",
@@ -242,7 +237,16 @@ class AbletonMCP(ControlSurface):
                 def main_thread_task():
                     try:
                         result = None
-                        if command_type == "create_midi_track":
+                        if command_type == "get_session_info":
+                            result = self._get_session_info()
+                        elif command_type == "get_track_info":
+                            track_index = params.get("track_index", 0)
+                            result = self._get_track_info(track_index)
+                        elif command_type == "get_device_parameters":
+                            track_index = params.get("track_index", 0)
+                            device_index = params.get("device_index", 0)
+                            result = self._get_device_parameters(track_index, device_index)
+                        elif command_type == "create_midi_track":
                             index = params.get("index", -1)
                             result = self._create_midi_track(index)
                         elif command_type == "set_track_name":
@@ -801,6 +805,45 @@ class AbletonMCP(ControlSurface):
             "min": param_min,
             "max": param_max
         }
+
+    def _get_device_parameters(self, track_index, device_index):
+        """Get all parameters of a device with their names, values, and ranges"""
+        tracks = self._song.tracks
+        if track_index < 0 or track_index >= len(tracks):
+            raise Exception(f"Track index {track_index} out of range")
+        track = tracks[track_index]
+        devices = track.devices
+        if device_index < 0 or device_index >= len(devices):
+            raise Exception(f"Device index {device_index} out of range (track has {len(devices)} devices)")
+        device = devices[device_index]
+        params = []
+        for i, param in enumerate(device.parameters):
+            try:
+                default_val = param.default_value
+            except:
+                default_val = None
+            try:
+                is_quant = param.is_quantized
+            except:
+                is_quant = False
+            params.append({
+                "index": i,
+                "name": param.name,
+                "value": param.value,
+                "min": param.min,
+                "max": param.max,
+                "default": default_val,
+                "is_quantized": is_quant
+            })
+        return {
+            "track_index": track_index,
+            "device_index": device_index,
+            "device_name": device.name,
+            "device_class": device.class_name,
+            "parameter_count": len(params),
+            "parameters": params
+        }
+
 
     def _get_browser_item(self, uri, path):
         """Get a browser item by URI or path"""
