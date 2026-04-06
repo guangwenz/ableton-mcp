@@ -229,6 +229,8 @@ class AbletonMCP(ControlSurface):
                                  "set_track_mute", "set_track_solo",
                                  "set_master_volume", "set_master_panning",
                                  "set_device_parameter",
+                                 "load_master_browser_item", "get_master_devices",
+                                 "get_master_device_parameters", "set_master_device_parameter",
                                  "search_browser", "list_browser_category"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
@@ -317,6 +319,19 @@ class AbletonMCP(ControlSurface):
                         elif command_type == "set_master_panning":
                             panning = params.get("panning", 0.0)
                             result = self._set_master_panning(panning)
+                        elif command_type == "load_master_browser_item":
+                            item_uri = params.get("item_uri", "")
+                            result = self._load_master_browser_item(item_uri)
+                        elif command_type == "get_master_devices":
+                            result = self._get_master_devices()
+                        elif command_type == "get_master_device_parameters":
+                            device_index = params.get("device_index", 0)
+                            result = self._get_master_device_parameters(device_index)
+                        elif command_type == "set_master_device_parameter":
+                            device_index = params.get("device_index", 0)
+                            parameter_index = params.get("parameter_index", 0)
+                            value = params.get("value", 0.0)
+                            result = self._set_master_device_parameter(device_index, parameter_index, value)
                         elif command_type == "set_device_parameter":
                             track_index = params.get("track_index", 0)
                             device_index = params.get("device_index", 0)
@@ -774,6 +789,107 @@ class AbletonMCP(ControlSurface):
         return {
             "panning": self._song.master_track.mixer_device.panning.value
         }
+
+    def _load_master_browser_item(self, item_uri):
+        """Load a browser item onto the master track by its URI"""
+        try:
+            master = self._song.master_track
+            app = self.application()
+            item = self._find_browser_item_by_uri(app.browser, item_uri)
+            if not item:
+                raise ValueError("Browser item with URI '{0}' not found".format(item_uri))
+            self._song.view.selected_track = master
+            app.browser.load_item(item)
+            return {
+                "loaded": True,
+                "item_name": item.name,
+                "track_name": "Master"
+            }
+        except Exception as e:
+            self.log_message("Error loading browser item on master: " + str(e))
+            self.log_message(traceback.format_exc())
+            raise
+
+    def _get_master_devices(self):
+        """Get all devices on the master track"""
+        master = self._song.master_track
+        devices = []
+        for i, device in enumerate(master.devices):
+            param_count = len(device.parameters) if hasattr(device, 'parameters') else 0
+            devices.append({
+                "index": i,
+                "name": device.name,
+                "class_name": device.class_name if hasattr(device, 'class_name') else "Unknown",
+                "parameter_count": param_count
+            })
+        return {
+            "track": "Master",
+            "device_count": len(devices),
+            "devices": devices
+        }
+
+    def _get_master_device_parameters(self, device_index):
+        """Get all parameters of a device on the master track"""
+        master = self._song.master_track
+        devices = master.devices
+        if device_index < 0 or device_index >= len(devices):
+            raise Exception("Device index {0} out of range (master has {1} devices)".format(device_index, len(devices)))
+        device = devices[device_index]
+        params = []
+        for i, param in enumerate(device.parameters):
+            try:
+                default_val = param.default_value
+            except:
+                default_val = None
+            try:
+                is_quant = param.is_quantized
+            except:
+                is_quant = False
+            params.append({
+                "index": i,
+                "name": param.name,
+                "value": param.value,
+                "min": param.min,
+                "max": param.max,
+                "default": default_val,
+                "is_quantized": is_quant
+            })
+        return {
+            "track": "Master",
+            "device_index": device_index,
+            "device_name": device.name,
+            "device_class": device.class_name if hasattr(device, 'class_name') else "Unknown",
+            "parameter_count": len(params),
+            "parameters": params
+        }
+
+    def _set_master_device_parameter(self, device_index, parameter_index, value):
+        """Set a device parameter on the master track (0.0 to 1.0)"""
+        master = self._song.master_track
+        devices = master.devices
+        if device_index < 0 or device_index >= len(devices):
+            raise Exception("Device index {0} out of range (master has {1} devices)".format(device_index, len(devices)))
+        device = devices[device_index]
+        params = device.parameters
+        if parameter_index < 0 or parameter_index >= len(params):
+            raise Exception("Parameter index {0} out of range".format(parameter_index))
+        param = params[parameter_index]
+        param_min = param.min
+        param_max = param.max
+        scaled_value = param_min + (float(value) * (param_max - param_min))
+        scaled_value = max(param_min, min(param_max, scaled_value))
+        param.value = scaled_value
+        return {
+            "track": "Master",
+            "device_index": device_index,
+            "device_name": device.name,
+            "parameter_index": parameter_index,
+            "parameter_name": param.name,
+            "value": param.value,
+            "min": param_min,
+            "max": param_max
+        }
+
 
     def _set_device_parameter(self, track_index, device_index, parameter_index, value):
         """Set a device parameter value (0.0 to 1.0)"""
