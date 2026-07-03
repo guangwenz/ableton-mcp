@@ -292,7 +292,8 @@ class AbletonMCP(ControlSurface):
                         elif command_type == "load_browser_item":
                             track_index = params.get("track_index", 0)
                             item_uri = params.get("item_uri", "")
-                            result = self._load_browser_item(track_index, item_uri)
+                            track_type = params.get("track_type", "track")
+                            result = self._load_browser_item(track_index, item_uri, track_type)
                         # ── Mixer / device / editing commands ─────────────────────
                         elif command_type == "set_track_mixer":
                             result = self._set_track_mixer(params)
@@ -306,8 +307,10 @@ class AbletonMCP(ControlSurface):
                             device_index = params.get("device_index", 0)
                             parameter_index = params.get("parameter_index", 0)
                             value = params.get("value", None)
+                            track_type = params.get("track_type", "track")
                             result = self._set_device_parameter(
-                                track_index, device_index, parameter_index, value)
+                                track_index, device_index, parameter_index, value,
+                                track_type)
                         elif command_type == "delete_track":
                             track_index = params.get("track_index", 0)
                             result = self._delete_track(track_index)
@@ -392,7 +395,9 @@ class AbletonMCP(ControlSurface):
             elif command_type == "get_device_parameters":
                 track_index = params.get("track_index", 0)
                 device_index = params.get("device_index", 0)
-                response["result"] = self._get_device_parameters(track_index, device_index)
+                track_type = params.get("track_type", "track")
+                response["result"] = self._get_device_parameters(
+                    track_index, device_index, track_type)
             elif command_type == "get_notes_from_clip":
                 track_index = params.get("track_index", 0)
                 clip_index = params.get("clip_index", 0)
@@ -409,7 +414,27 @@ class AbletonMCP(ControlSurface):
         return response
     
     # Command implementations
-    
+
+    def _resolve_track(self, track_index, track_type="track"):
+        """Resolve a track reference: regular track, return track, or master.
+
+        track_index is ignored for the master track.
+        """
+        if track_type == "master":
+            return self._song.master_track
+        if track_type == "return":
+            if track_index < 0 or track_index >= len(self._song.return_tracks):
+                raise IndexError(
+                    "Return track index out of range (song has %d return tracks)"
+                    % len(self._song.return_tracks))
+            return self._song.return_tracks[track_index]
+        if track_type != "track":
+            raise ValueError(
+                "Unknown track_type '%s' (expected 'track', 'return' or 'master')" % track_type)
+        if track_index < 0 or track_index >= len(self._song.tracks):
+            raise IndexError("Track index out of range")
+        return self._song.tracks[track_index]
+
     def _safe_song_property(self, attr, cast, default):
         """Read self._song.<attr> with cast, returning default on common failures.
         Catches only narrow exceptions so genuine bugs still surface."""
@@ -545,10 +570,11 @@ class AbletonMCP(ControlSurface):
         applied, so callers can change volume without touching mute, etc."""
         try:
             track_index = params.get("track_index", 0)
-            if track_index < 0 or track_index >= len(self._song.tracks):
-                raise IndexError("Track index out of range")
+            track_type = params.get("track_type", "track")
+            track = self._resolve_track(track_index, track_type)
 
-            track = self._song.tracks[track_index]
+            if track_type == "master" and any(k in params for k in ("mute", "solo", "arm")):
+                raise ValueError("The master track has no mute/solo/arm")
 
             if "volume" in params:
                 volume = float(params["volume"])
@@ -573,9 +599,9 @@ class AbletonMCP(ControlSurface):
                 "name": track.name,
                 "volume": track.mixer_device.volume.value,
                 "pan": track.mixer_device.panning.value,
-                "mute": track.mute,
-                "solo": track.solo,
-                "arm": track.arm if track.can_be_armed else False
+                "mute": getattr(track, "mute", False),
+                "solo": getattr(track, "solo", False),
+                "arm": track.arm if getattr(track, "can_be_armed", False) else False
             }
             return result
         except Exception as e:
@@ -988,11 +1014,10 @@ class AbletonMCP(ControlSurface):
     
     # ── Device parameter implementations ──────────────────────────────────────
 
-    def _get_device_and_parameter(self, track_index, device_index, parameter_index=None):
+    def _get_device_and_parameter(self, track_index, device_index, parameter_index=None,
+                                  track_type="track"):
         """Resolve (track, device[, parameter]) with range-checked indices."""
-        if track_index < 0 or track_index >= len(self._song.tracks):
-            raise IndexError("Track index out of range")
-        track = self._song.tracks[track_index]
+        track = self._resolve_track(track_index, track_type)
 
         if device_index < 0 or device_index >= len(track.devices):
             raise IndexError(
@@ -1007,10 +1032,11 @@ class AbletonMCP(ControlSurface):
                 "Parameter index out of range (device has %d parameters)" % len(device.parameters))
         return track, device, device.parameters[parameter_index]
 
-    def _get_device_parameters(self, track_index, device_index):
+    def _get_device_parameters(self, track_index, device_index, track_type="track"):
         """List all automatable parameters of a device with values and ranges"""
         try:
-            track, device, _ = self._get_device_and_parameter(track_index, device_index)
+            track, device, _ = self._get_device_and_parameter(
+                track_index, device_index, track_type=track_type)
 
             parameters = []
             for param_index, param in enumerate(device.parameters):
@@ -1048,14 +1074,15 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error getting device parameters: " + str(e))
             raise
 
-    def _set_device_parameter(self, track_index, device_index, parameter_index, value):
+    def _set_device_parameter(self, track_index, device_index, parameter_index, value,
+                              track_type="track"):
         """Set a device parameter's value, validating against its range"""
         try:
             if value is None:
                 raise ValueError("Parameter value is required")
 
             track, device, param = self._get_device_and_parameter(
-                track_index, device_index, parameter_index)
+                track_index, device_index, parameter_index, track_type=track_type)
 
             if not param.is_enabled:
                 raise Exception(
@@ -1334,14 +1361,11 @@ class AbletonMCP(ControlSurface):
     
     
     
-    def _load_browser_item(self, track_index, item_uri):
-        """Load a browser item onto a track by its URI"""
+    def _load_browser_item(self, track_index, item_uri, track_type="track"):
+        """Load a browser item onto a track (regular, return, or master) by its URI"""
         try:
-            if track_index < 0 or track_index >= len(self._song.tracks):
-                raise IndexError("Track index out of range")
-            
-            track = self._song.tracks[track_index]
-            
+            track = self._resolve_track(track_index, track_type)
+
             # Access the application's browser instance instead of creating a new one
             app = self.application()
             

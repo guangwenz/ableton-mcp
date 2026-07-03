@@ -347,21 +347,24 @@ def set_track_mixer(
     pan: Union[float, None] = None,
     mute: Union[bool, None] = None,
     solo: Union[bool, None] = None,
-    arm: Union[bool, None] = None
+    arm: Union[bool, None] = None,
+    track_type: str = "track"
 ) -> str:
     """
     Set mixer properties of a track. Only the parameters you pass are changed.
 
     Parameters:
-    - track_index: The index of the track to modify
+    - track_index: The index of the track to modify (ignored for the master track)
     - volume: Track volume, 0.0-1.0 (0.85 = 0 dB, 1.0 = +6 dB)
     - pan: Stereo panning, -1.0 (left) to 1.0 (right)
     - mute: Mute the track (True) or unmute it (False)
     - solo: Solo the track (True) or unsolo it (False)
     - arm: Arm the track for recording (True) or disarm it (False)
+    - track_type: 'track' (default), 'return', or 'master'. The master track
+      only supports volume and pan.
     """
     try:
-        params = {"track_index": track_index}
+        params = {"track_index": track_index, "track_type": track_type}
         if volume is not None:
             params["volume"] = volume
         if pan is not None:
@@ -372,7 +375,7 @@ def set_track_mixer(
             params["solo"] = solo
         if arm is not None:
             params["arm"] = arm
-        if len(params) == 1:
+        if len(params) == 2:
             return "No mixer properties given — pass at least one of volume, pan, mute, solo, arm"
         ableton = get_ableton_connection()
         result = ableton.send_command("set_track_mixer", params)
@@ -579,19 +582,22 @@ def set_tempo(ctx: Context, tempo: float) -> str:
 
 
 @mcp.tool()
-def load_instrument_or_effect(ctx: Context, track_index: int, uri: str) -> str:
+def load_instrument_or_effect(ctx: Context, track_index: int, uri: str, track_type: str = "track") -> str:
     """
     Load an instrument or effect onto a track using its URI.
 
     Parameters:
-    - track_index: The index of the track to load the instrument on
+    - track_index: The index of the track to load the instrument on (ignored for the master track)
     - uri: The URI of the instrument or effect to load (e.g., 'query:Synths#Instrument%20Rack:Bass:FileId_5116')
+    - track_type: 'track' (default), 'return', or 'master'. Use 'master' to load
+      audio effects (meters, limiters, EQ) onto the master track.
     """
     try:
         ableton = get_ableton_connection()
         result = ableton.send_command("load_browser_item", {
             "track_index": track_index,
-            "item_uri": uri
+            "item_uri": uri,
+            "track_type": track_type
         })
 
         # Check if the instrument was loaded successfully
@@ -609,7 +615,7 @@ def load_instrument_or_effect(ctx: Context, track_index: int, uri: str) -> str:
         return f"Error loading instrument by URI: {str(e)}"
 
 @mcp.tool()
-def get_device_parameters(ctx: Context, track_index: int, device_index: int) -> str:
+def get_device_parameters(ctx: Context, track_index: int, device_index: int, track_type: str = "track") -> str:
     """
     List all automatable parameters of a device on a track, with their current
     values, ranges, and (for quantized parameters) the available options.
@@ -617,14 +623,16 @@ def get_device_parameters(ctx: Context, track_index: int, device_index: int) -> 
     Use get_track_info first to find device indices.
 
     Parameters:
-    - track_index: The index of the track containing the device
+    - track_index: The index of the track containing the device (ignored for the master track)
     - device_index: The index of the device on that track
+    - track_type: 'track' (default), 'return', or 'master'
     """
     try:
         ableton = get_ableton_connection()
         result = ableton.send_command("get_device_parameters", {
             "track_index": track_index,
-            "device_index": device_index
+            "device_index": device_index,
+            "track_type": track_type
         })
         return json.dumps(result, indent=2)
     except Exception as e:
@@ -637,7 +645,8 @@ def set_device_parameter(
     track_index: int,
     device_index: int,
     parameter_index: int,
-    value: float
+    value: float,
+    track_type: str = "track"
 ) -> str:
     """
     Set the value of a device parameter. Use get_device_parameters first to
@@ -645,10 +654,11 @@ def set_device_parameter(
     range are rejected.
 
     Parameters:
-    - track_index: The index of the track containing the device
+    - track_index: The index of the track containing the device (ignored for the master track)
     - device_index: The index of the device on that track
     - parameter_index: The index of the parameter (from get_device_parameters)
     - value: The new value, within the parameter's [min, max] range
+    - track_type: 'track' (default), 'return', or 'master'
     """
     try:
         ableton = get_ableton_connection()
@@ -656,7 +666,8 @@ def set_device_parameter(
             "track_index": track_index,
             "device_index": device_index,
             "parameter_index": parameter_index,
-            "value": value
+            "value": value,
+            "track_type": track_type
         })
         return (
             f"Set '{result.get('name', 'parameter')}' on device {device_index} "
