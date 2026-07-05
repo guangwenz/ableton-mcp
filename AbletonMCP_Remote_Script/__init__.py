@@ -1150,11 +1150,21 @@ class AbletonMCP(ControlSurface):
                 steps.append((time_val, value))
             steps.sort(key=lambda s: s[0])
 
+            # automation_envelope() only RETURNS an existing envelope;
+            # creating one needs create_automation_envelope() (Live 11+).
             envelope = clip.automation_envelope(param)
             if envelope is None:
+                create = getattr(clip, "create_automation_envelope", None)
+                if create is None:
+                    raise Exception(
+                        "This Live version has no Clip.create_automation_envelope "
+                        "API — draw one automation point by hand first")
+                envelope = create(param)
+            if envelope is None:
                 raise Exception(
-                    "Live could not create an automation envelope for '%s' — "
-                    "the parameter must belong to a device on the clip's track" % param.name)
+                    "create_automation_envelope('%s') returned None — the "
+                    "parameter must belong to a device on the clip's track"
+                    % param.name)
 
             for i, (time_val, value) in enumerate(steps):
                 # Each step holds until the next point; the last one holds to
